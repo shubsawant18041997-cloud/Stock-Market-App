@@ -12,12 +12,26 @@ export class HttpError extends Error {
   }
 }
 
+// Network-level failures ("fetch failed": connection reset, DNS blip, timeout)
+// are usually transient on cloud hosts, so retry those once. HTTP errors
+// (404, 429…) are real answers and are not retried here.
+const isNetworkError = (e) => e?.name === 'TimeoutError' || e?.name === 'AbortError' || (e instanceof TypeError && /fetch failed/i.test(e.message));
+
 export async function fetchRaw(url, { headers = {}, timeoutMs = 10000, ...rest } = {}) {
-  const res = await fetch(url, {
-    headers: { 'User-Agent': BROWSER_UA, ...headers },
-    signal: AbortSignal.timeout(timeoutMs),
-    ...rest,
-  });
+  const attempt = () =>
+    fetch(url, {
+      headers: { 'User-Agent': BROWSER_UA, ...headers },
+      signal: AbortSignal.timeout(timeoutMs),
+      ...rest,
+    });
+  let res;
+  try {
+    res = await attempt();
+  } catch (e) {
+    if (!isNetworkError(e) || (rest.method && rest.method !== 'GET')) throw e;
+    await new Promise((r) => setTimeout(r, 500));
+    res = await attempt();
+  }
   if (!res.ok) {
     const body = await res.text().catch(() => '');
     throw new HttpError(res.status, url, body.slice(0, 300));
