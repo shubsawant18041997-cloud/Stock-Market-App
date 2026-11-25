@@ -296,6 +296,12 @@ app.use((err, _req, res, _next) => {
   res.status(status).json({ error: err.message || 'upstream error' });
 });
 
+// On a public host, refuse to run wide open.
+if (process.env.NODE_ENV === 'production' && !config.apiToken) {
+  console.error('API_TOKEN must be set when NODE_ENV=production (anyone on the internet could use this server otherwise).');
+  process.exit(1);
+}
+
 db(); // load store
 app.listen(config.port, '0.0.0.0', () => {
   console.log(`Stock Tracker server listening on http://0.0.0.0:${config.port}`);

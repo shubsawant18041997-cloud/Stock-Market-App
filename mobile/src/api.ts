@@ -90,7 +90,13 @@ export type SearchResult = { market: Market; symbol: string; name: string; excha
 const KEY = 'connection.v1';
 type Connection = { serverUrl: string; apiKey: string };
 
+// Release builds get the hosted server baked in at build time (EAS env vars),
+// so people you share the APK with don't have to type anything.
+const BUILT_IN_SERVER = (process.env.EXPO_PUBLIC_SERVER_URL || '').replace(/\/$/, '');
+const BUILT_IN_API_KEY = process.env.EXPO_PUBLIC_API_KEY || '';
+
 function defaultServerUrl() {
+  if (BUILT_IN_SERVER) return BUILT_IN_SERVER;
   // In development, the phone reaches the dev machine at the same IP Metro uses.
   const host = Constants.expoConfig?.hostUri?.split(':')[0];
   return host ? `http://${host}:4000` : 'http://localhost:4000';
@@ -104,7 +110,7 @@ export async function getConnection(): Promise<Connection> {
     const raw = await AsyncStorage.getItem(KEY);
     if (raw) conn = JSON.parse(raw);
   } catch {}
-  conn ||= { serverUrl: defaultServerUrl(), apiKey: '' };
+  conn ||= { serverUrl: defaultServerUrl(), apiKey: BUILT_IN_API_KEY };
   return conn;
 }
 

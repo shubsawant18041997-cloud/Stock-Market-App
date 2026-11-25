@@ -118,3 +118,11 @@ export function allUsers() {
 process.on('exit', () => {
   if (saveTimer) flush();
 });
+// Hosts stop the container with SIGTERM on every deploy/restart: write pending
+// changes first, otherwise the last few seconds of edits would be lost.
+for (const sig of ['SIGTERM', 'SIGINT']) {
+  process.on(sig, () => {
+    if (saveTimer) flush();
+    process.exit(0);
+  });
+}
