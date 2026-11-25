@@ -40,9 +40,17 @@
       [
         "expo-build-properties",
         {
-          "android": { "usesCleartextTraffic": true }
+          "android": {
+            "usesCleartextTraffic": true
+          }
         }
       ]
-    ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "cde773e1-1731-457d-a7b0-af2856577f33"
+      }
+    },
+    "owner": "shubsawant18"
   }
 }
