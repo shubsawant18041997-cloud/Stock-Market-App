@@ -11,7 +11,6 @@
 //   with the asset today (e.g. US close -> next Indian session).
 // Correlation measures co-movement, not causation.
 import * as yahoo from './providers/yahoo.js';
-import { db } from './store.js';
 import { mapLimit } from './http.js';
 
 export const FACTORS = [
@@ -67,10 +66,8 @@ export function resolveKey(key) {
 
 async function load(desc) {
   const s = await yahoo.dailySeries(desc.yahoo, '2y');
-  if (desc.group?.endsWith('stock') || desc.key.startsWith('CRYPTO')) {
-    const w = db().watchlist.find((x) => `${x.market}:${x.symbol}` === desc.key);
-    desc.name = w?.name || s.meta.name || desc.name;
-  }
+  // series are shared by everyone, so name them from the data source, not a watchlist
+  if (desc.group?.endsWith('stock') || desc.key.startsWith('CRYPTO')) desc.name = s.meta.name || desc.name;
   return s;
 }
 

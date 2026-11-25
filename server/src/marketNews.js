@@ -13,7 +13,6 @@ import { createHash } from 'node:crypto';
 import { XMLParser } from 'fast-xml-parser';
 import { getText, cached, qs, mapLimit } from './http.js';
 import { scoreText } from './news.js';
-import { db } from './store.js';
 
 const xml = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: '@_' });
 
@@ -99,8 +98,8 @@ async function fetchFeed(f) {
   });
 }
 
-function watchlistMatchers() {
-  return db().watchlist.map((w) => {
+function watchlistMatchers(watchlist) {
+  return watchlist.map((w) => {
     const base = w.symbol.replace(/\.(NS|BO)$/, '');
     const name = (w.name || '').replace(/\b(inc|corp|corporation|ltd|limited|plc|co|industries|services)\.?/gi, '').trim();
     const parts = [base.length >= 3 ? `\\b${base}\\b` : null, name.length >= 4 ? `\\b${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b` : null].filter(Boolean);
@@ -108,18 +107,36 @@ function watchlistMatchers() {
   });
 }
 
-function score(story, matchers) {
+/** Shared part of the score (everything except the per-person watchlist bonus). */
+function baseScore(story) {
   const text = story.title.toLowerCase();
   let topic = 0;
   for (const [re, w] of IMPACT_TERMS) if (re.test(text)) topic += w;
   topic = Math.min(35, topic);
   const coverage = Math.min(30, (story.sources.size - 1) * 6);
-  const mentions = matchers.filter((m) => m.re?.test(story.title)).map((m) => m.item);
-  const watch = mentions.length ? 15 : 0;
   const senti = Math.min(10, Math.abs(story.sentiment.score) * 15);
   const ageH = (Date.now() - story.time) / 3600_000;
   const recency = Math.max(0, 10 - ageH * 0.6);
-  return { importance: Math.round(Math.min(100, topic + coverage + watch + senti + recency)), mentions };
+  return topic + coverage + senti + recency;
+}
+
+const level = (importance) => (importance >= 60 ? 'high' : importance >= 35 ? 'medium' : 'low');
+
+/** Add one person's watchlist mentions (+15 importance) to the shared stories. */
+function personalise(stories, watchlist) {
+  const matchers = watchlistMatchers(watchlist);
+  return stories.map((s) => {
+    const mentions = matchers.filter((m) => m.re?.test(s.title)).map((m) => m.item);
+    const importance = Math.round(Math.min(100, s.base + (mentions.length ? 15 : 0)));
+    const { base: _b, assets, ...rest } = s;
+    return {
+      ...rest,
+      importance,
+      level: level(importance),
+      affects: [...new Set([...mentions.map((m) => m.symbol.replace(/\.(NS|BO)$/, '')), ...assets])].slice(0, 7),
+      watchlist: mentions.map((m) => ({ market: m.market, symbol: m.symbol })),
+    };
+  });
 }
 
 function impacts(title) {
@@ -170,11 +187,9 @@ async function buildFeed() {
     stories.push({ ...n, tokens: tk, sources: new Set([n.source]), categories: new Set([n.category]), related: [] });
   }
 
-  const matchers = watchlistMatchers();
   const built = stories.map((s) => {
     const sentiment = scoreText(s.title);
-    const st = { ...s, sentiment };
-    const { importance, mentions } = score(st, matchers);
+    const base = baseScore({ ...s, sentiment });
     const { assets, why } = impacts(s.title);
     return {
       // hash the full URL: Google News links share a long common prefix
@@ -186,10 +201,8 @@ async function buildFeed() {
       categories: [...s.categories],
       coverage: s.sources.size,
       sentiment,
-      importance,
-      level: importance >= 60 ? 'high' : importance >= 35 ? 'medium' : 'low',
-      affects: [...new Set([...mentions.map((m) => m.symbol.replace(/\.(NS|BO)$/, '')), ...assets])].slice(0, 7),
-      watchlist: mentions.map((m) => ({ market: m.market, symbol: m.symbol })),
+      base,
+      assets,
       why,
       related: s.related,
     };
@@ -206,8 +219,8 @@ async function getFeed() {
   return stories;
 }
 
-export async function marketNews({ category = 'all', limit = 50 } = {}) {
-  const all = await getFeed();
+export async function marketNews({ category = 'all', limit = 50, watchlist = [] } = {}) {
+  const all = personalise(await getFeed(), watchlist);
   const list = category === 'all' ? all : category === 'watchlist' ? all.filter((s) => s.watchlist.length) : all.filter((s) => s.categories.includes(category));
   return diversify(list, limit, category === 'all');
 }

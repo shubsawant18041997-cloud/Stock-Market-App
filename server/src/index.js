@@ -2,7 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import { Expo } from 'expo-server-sdk';
 import { config, emailConfigured } from './config.js';
-import { db, save } from './store.js';
+import { db, save, user, allUsers, validUserId } from './store.js';
 import * as providers from './providers/index.js';
 import { newsFor, summarise as summariseNews } from './news.js';
 import { earningsWithSummary } from './earnings.js';
@@ -27,8 +27,27 @@ app.use('/api', (req, res, next) => {
   res.status(401).json({ error: 'invalid or missing x-api-key' });
 });
 
-const findItem = (market, symbol) =>
-  db().watchlist.find((w) => w.market === market && w.symbol === symbol) || { market, symbol };
+// Per-phone profile: the app sends a random id in `x-user-id`. Shared market
+// data works without it; anything personal (watchlist, alerts…) needs it.
+app.use('/api', (req, res, next) => {
+  const uid = req.get('x-user-id');
+  if (!uid) return next();
+  if (!validUserId(uid)) return res.status(400).json({ error: 'invalid x-user-id' });
+  const u = user(uid);
+  if (!u) return res.status(503).json({ error: 'this server has reached its profile limit (MAX_USERS)' });
+  req.user = u;
+  next();
+});
+
+const me = (req) => {
+  if (!req.user) throw Object.assign(new Error('missing x-user-id header: please update the app'), { status: 400 });
+  return req.user;
+};
+
+const findItem = (req, market, symbol) =>
+  req.user?.watchlist.find((w) => w.market === market && w.symbol === symbol) || { market, symbol };
+
+const MAX_WATCHLIST = 100;
 
 const params = (req) => {
   const market = String(req.params.market || req.query.market || '').toUpperCase();
@@ -38,30 +57,33 @@ const params = (req) => {
 
 // ---------------------------------------------------------------- status
 
-app.get('/api/status', (_req, res) => {
+app.get('/api/status', (req, res) => {
+  const u = req.user;
   res.json({
     markets: Object.fromEntries(providers.MARKETS.map((m) => [m, sessionStatus(m)])),
-    email: { configured: emailConfigured(), to: alertEmail() || null },
-    push: { devices: db().devices.length },
+    email: { configured: emailConfigured(), to: u ? alertEmail(u) || null : null },
+    push: { devices: u ? u.devices.length : 0 },
     finnhub: Boolean(config.finnhubKey),
     scheduler: schedulerStatus(),
-    counts: { watchlist: db().watchlist.length, rules: db().rules.length, history: db().history.length },
+    counts: u ? { watchlist: u.watchlist.length, rules: u.rules.length, history: u.history.length } : null,
   });
 });
 
 // ---------------------------------------------------------------- watchlist
 
-app.get('/api/watchlist', (req, res) => {
+app.get('/api/watchlist', wrap(async (req, res) => {
   const market = req.query.market?.toUpperCase();
-  res.json(db().watchlist.filter((w) => !market || w.market === market));
-});
+  res.json(me(req).watchlist.filter((w) => !market || w.market === market));
+}));
 
 app.post('/api/watchlist', wrap(async (req, res) => {
+  const u = me(req);
   const market = String(req.body.market || '').toUpperCase();
   const { symbol } = params({ params: { market, symbol: req.body.symbol }, query: {} });
-  if (db().watchlist.some((w) => w.market === market && w.symbol === symbol)) {
+  if (u.watchlist.some((w) => w.market === market && w.symbol === symbol)) {
     return res.status(409).json({ error: `${symbol} is already on the watchlist` });
   }
+  if (u.watchlist.length >= MAX_WATCHLIST) return res.status(400).json({ error: `watchlist limit of ${MAX_WATCHLIST} reached` });
   // verify the symbol resolves before saving it
   let q;
   try {
@@ -69,18 +91,19 @@ app.post('/api/watchlist', wrap(async (req, res) => {
   } catch (e) {
     return res.status(404).json({ error: `Could not find ${symbol} (${market}): ${e.message}` });
   }
-  const item = { market, symbol, name: req.body.name || q.name || symbol, addedAt: Date.now() };
-  db().watchlist.push(item);
+  const item = { market, symbol, name: String(req.body.name || q.name || symbol).slice(0, 120), addedAt: Date.now() };
+  u.watchlist.push(item);
   save();
   res.status(201).json(item);
 }));
 
 app.delete('/api/watchlist/:market/:symbol', wrap(async (req, res) => {
+  const u = me(req);
   const { market, symbol } = params(req);
-  const before = db().watchlist.length;
-  db().watchlist = db().watchlist.filter((w) => !(w.market === market && w.symbol === symbol));
+  const before = u.watchlist.length;
+  u.watchlist = u.watchlist.filter((w) => !(w.market === market && w.symbol === symbol));
   save();
-  res.status(db().watchlist.length < before ? 204 : 404).end();
+  res.status(u.watchlist.length < before ? 204 : 404).end();
 }));
 
 // ---------------------------------------------------------------- market data
@@ -96,7 +119,7 @@ app.get('/api/quotes', wrap(async (req, res) => {
     }).filter((i) => providers.MARKETS.includes(i.market)).slice(0, 50);
   } else {
     const market = req.query.market?.toUpperCase();
-    items = db().watchlist.filter((w) => !market || w.market === market);
+    items = me(req).watchlist.filter((w) => !market || w.market === market);
   }
   const quotes = await providers.quotes(items);
   res.json(quotes.map((q, i) => ({ ...q, name: items[i].name || q.name })));
@@ -121,7 +144,7 @@ app.get('/api/search', wrap(async (req, res) => {
 
 app.get('/api/news/:market/:symbol', wrap(async (req, res) => {
   const { market, symbol } = params(req);
-  const news = await newsFor(findItem(market, symbol));
+  const news = await newsFor(findItem(req, market, symbol));
   res.json({ market, symbol, sentiment: summariseNews(news), items: news });
 }));
 
@@ -136,7 +159,7 @@ app.get('/api/earnings/:market/:symbol', wrap(async (req, res) => {
 app.get('/api/market-news', wrap(async (req, res) => {
   const category = String(req.query.category || 'all').toLowerCase();
   if (!NEWS_CATEGORIES.includes(category)) return res.status(400).json({ error: `category must be one of ${NEWS_CATEGORIES.join(', ')}` });
-  res.json({ category, items: await marketNews({ category, limit: Math.min(Number(req.query.limit) || 50, 100) }) });
+  res.json({ category, items: await marketNews({ category, limit: Math.min(Number(req.query.limit) || 50, 100), watchlist: req.user?.watchlist || [] }) });
 }));
 
 // ---------------------------------------------------------------- macro / correlations
@@ -152,7 +175,7 @@ app.get('/api/macro/correlations', wrap(async (req, res) => {
   let keys;
   if (req.query.keys) keys = String(req.query.keys).split(',').filter(Boolean);
   else if (req.query.preset === 'watchlist') {
-    keys = [...db().watchlist.slice(0, 10).map((w) => `${w.market}:${w.symbol}`), 'F:SPX', 'F:NIFTY', 'F:GOLD', 'F:DXY'];
+    keys = [...me(req).watchlist.slice(0, 10).map((w) => `${w.market}:${w.symbol}`), 'F:SPX', 'F:NIFTY', 'F:GOLD', 'F:DXY'];
   } else keys = (macro.PRESETS[req.query.preset] || macro.PRESETS.core).map((id) => `F:${id}`);
   res.json(await macro.matrix([...new Set(keys)].slice(0, 16), String(req.query.window || '90')));
 }));
@@ -173,63 +196,73 @@ app.get('/api/macro/pair', wrap(async (req, res) => {
 
 const withDescription = (r) => ({ ...r, description: describeRule(r) });
 
-app.get('/api/alerts', (req, res) => {
+app.get('/api/alerts', wrap(async (req, res) => {
   const { market, symbol } = req.query;
   res.json(
-    db().rules
+    me(req).rules
       .filter((r) => (!market || r.market === market.toUpperCase()) && (!symbol || r.symbol === symbol.toUpperCase()))
       .map(withDescription)
   );
-});
+}));
 
 app.get('/api/alerts/types', (_req, res) => res.json(RULE_TYPES));
 
-app.post('/api/alerts', (req, res) => res.status(201).json(withDescription(createRule(req.body || {}))));
+app.post('/api/alerts', wrap(async (req, res) => res.status(201).json(withDescription(createRule(me(req), req.body || {})))));
 
-app.patch('/api/alerts/:id', (req, res) => {
-  const r = updateRule(req.params.id, req.body || {});
+app.patch('/api/alerts/:id', wrap(async (req, res) => {
+  const r = updateRule(me(req), req.params.id, req.body || {});
   r ? res.json(withDescription(r)) : res.status(404).json({ error: 'rule not found' });
-});
+}));
 
-app.delete('/api/alerts/:id', (req, res) => res.status(deleteRule(req.params.id) ? 204 : 404).end());
+app.delete('/api/alerts/:id', wrap(async (req, res) => res.status(deleteRule(me(req), req.params.id) ? 204 : 404).end()));
 
-app.get('/api/history', (req, res) => {
+app.get('/api/history', wrap(async (req, res) => {
   const limit = Math.min(Number(req.query.limit) || 100, 500);
-  res.json(db().history.slice(0, limit));
-});
+  res.json(me(req).history.slice(0, limit));
+}));
 
-app.delete('/api/history', (_req, res) => {
-  db().history = [];
+app.delete('/api/history', wrap(async (req, res) => {
+  me(req).history = [];
   save();
   res.status(204).end();
-});
+}));
 
-// Evaluate price/volume rules right now (ignores market hours) — handy for testing
-app.post('/api/alerts/run', wrap(async (_req, res) => res.json({ fired: await evaluateQuoteRules({ force: true }) })));
+// Evaluate this profile's price/volume rules right now (ignores market hours) — handy for testing
+app.post('/api/alerts/run', wrap(async (req, res) => res.json({ fired: await evaluateQuoteRules({ force: true, only: me(req) }) })));
 
 // ---------------------------------------------------------------- devices + settings
 
-app.post('/api/devices', (req, res) => {
+app.post('/api/devices', wrap(async (req, res) => {
+  const u = me(req);
   const token = String(req.body.token || '');
   if (!Expo.isExpoPushToken(token)) return res.status(400).json({ error: 'not a valid Expo push token' });
-  const d = db().devices;
+  // a phone belongs to one profile: if it switched profiles, stop sending it the old one's alerts
+  for (const other of allUsers()) {
+    if (other !== u && other.devices.some((x) => x.token === token)) other.devices = other.devices.filter((x) => x.token !== token);
+  }
+  const d = u.devices;
   const existing = d.find((x) => x.token === token);
   if (existing) existing.lastSeen = Date.now();
   else d.push({ token, platform: req.body.platform || null, addedAt: Date.now(), lastSeen: Date.now() });
   save();
   res.status(existing ? 200 : 201).json({ ok: true, devices: d.length });
-});
+}));
 
-app.delete('/api/devices/:token', (req, res) => {
-  db().devices = db().devices.filter((x) => x.token !== req.params.token);
+app.delete('/api/devices/:token', wrap(async (req, res) => {
+  const u = me(req);
+  u.devices = u.devices.filter((x) => x.token !== req.params.token);
   save();
   res.status(204).end();
-});
+}));
 
-app.get('/api/settings', (_req, res) => res.json({ ...db().settings, email: alertEmail(), emailConfigured: emailConfigured() }));
+app.get('/api/settings', wrap(async (req, res) => {
+  const u = me(req);
+  res.json({ ...u.settings, email: alertEmail(u), emailConfigured: emailConfigured() });
+}));
 
-app.put('/api/settings', (req, res) => {
-  const s = db().settings;
+app.put('/api/settings', wrap(async (req, res) => {
+  const u = me(req);
+  const s = u.settings;
   const { email, emailEnabled, pushEnabled } = req.body || {};
   if (email !== undefined) {
     const e = String(email).trim();
@@ -239,11 +272,12 @@ app.put('/api/settings', (req, res) => {
   if (emailEnabled !== undefined) s.emailEnabled = Boolean(emailEnabled);
   if (pushEnabled !== undefined) s.pushEnabled = Boolean(pushEnabled);
   save();
-  res.json({ ...s, email: alertEmail(), emailConfigured: emailConfigured() });
-});
+  res.json({ ...s, email: alertEmail(u), emailConfigured: emailConfigured() });
+}));
 
-app.post('/api/test-notification', wrap(async (_req, res) => {
+app.post('/api/test-notification', wrap(async (req, res) => {
   const entry = await deliver({
+    user: me(req),
     rule: null,
     title: '✅ Stock Tracker test alert',
     body: 'If you can read this, alerts are working.',

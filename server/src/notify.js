@@ -2,7 +2,7 @@
 import nodemailer from 'nodemailer';
 import { Expo } from 'expo-server-sdk';
 import { config, emailConfigured } from './config.js';
-import { db, save, id } from './store.js';
+import { save, id } from './store.js';
 
 const expo = new Expo();
 let transporter = null;
@@ -20,10 +20,11 @@ function mailer() {
   return transporter;
 }
 
-export const alertEmail = () => db().settings.email || config.alertEmail;
+// All functions below act on one profile `u` (from store.user()).
+export const alertEmail = (u) => u.settings.email || '';
 
-export async function sendPush({ title, body, data }) {
-  const tokens = db().devices.map((d) => d.token).filter((t) => Expo.isExpoPushToken(t));
+export async function sendPush(u, { title, body, data }) {
+  const tokens = u.devices.map((d) => d.token).filter((t) => Expo.isExpoPushToken(t));
   if (!tokens.length) return { sent: 0, skipped: 'no registered devices' };
   const messages = tokens.map((to) => ({ to, title, body, data, sound: 'default', priority: 'high', channelId: 'alerts' }));
   let sent = 0;
@@ -41,15 +42,15 @@ export async function sendPush({ title, body, data }) {
     }
   }
   if (dead.size) {
-    db().devices = db().devices.filter((d) => !dead.has(d.token));
+    u.devices = u.devices.filter((d) => !dead.has(d.token));
     save();
   }
   return { sent };
 }
 
-export async function sendEmail({ subject, text, html }) {
+export async function sendEmail(u, { subject, text, html }) {
   const t = mailer();
-  const to = alertEmail();
+  const to = alertEmail(u);
   if (!t) return { sent: 0, skipped: 'SMTP not configured' };
   if (!to) return { sent: 0, skipped: 'no alert email set' };
   await t.sendMail({ from: config.smtp.from, to, subject, text, html });
@@ -59,13 +60,13 @@ export async function sendEmail({ subject, text, html }) {
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
 
 /** Deliver an alert on the channels the rule asks for and record it. */
-export async function deliver({ rule, title, body, details = [], links = [] }) {
-  const s = db().settings;
+export async function deliver({ user: u, rule, title, body, details = [], links = [] }) {
+  const s = u.settings;
   const channels = rule?.channels || { push: true, email: true };
   const result = { push: null, email: null };
 
   if (channels.push && s.pushEnabled !== false) {
-    result.push = await sendPush({
+    result.push = await sendPush(u, {
       title,
       body,
       data: rule ? { ruleId: rule.id, market: rule.market, symbol: rule.symbol } : {},
@@ -82,7 +83,7 @@ export async function deliver({ rule, title, body, details = [], links = [] }) {
         <p style="color:#888;font-size:12px">Sent by Stock Tracker. Data may be delayed; not investment advice.</p>
       </div>`;
     try {
-      result.email = await sendEmail({ subject: title, text, html });
+      result.email = await sendEmail(u, { subject: title, text, html });
     } catch (e) {
       console.error('[email] send failed:', e.message);
       result.email = { sent: 0, error: e.message };
@@ -101,10 +102,10 @@ export async function deliver({ rule, title, body, details = [], links = [] }) {
     details,
     delivery: result,
   };
-  const h = db().history;
+  const h = u.history;
   h.unshift(entry);
   if (h.length > 500) h.length = 500;
   save();
-  console.log(`[alert] ${title} — ${body}`);
+  console.log(`[alert] ${u.id.slice(0, 8)}… ${title} — ${body}`);
   return entry;
 }

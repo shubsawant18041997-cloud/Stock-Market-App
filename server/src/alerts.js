@@ -11,7 +11,7 @@
 // Threshold rules are edge-triggered: once fired they re-arm only after the
 // condition has gone false again, plus a cooldown, so you get one alert per
 // move instead of one per poll.
-import { db, save, id } from './store.js';
+import { db, save, id, allUsers } from './store.js';
 import { config } from './config.js';
 import { quotes as fetchQuotes, normaliseSymbol, MARKETS } from './providers/index.js';
 import { isOpen } from './marketHours.js';
@@ -61,16 +61,20 @@ export function validateRule(input, existing = {}) {
   return r;
 }
 
-export function createRule(input) {
+const MAX_RULES_PER_USER = 100;
+
+/** Rules belong to one profile (`u` from store.user()). */
+export function createRule(u, input) {
+  if (u.rules.length >= MAX_RULES_PER_USER) throw bad(`limit of ${MAX_RULES_PER_USER} alerts reached`);
   const rule = validateRule(input);
   Object.assign(rule, { id: id(), createdAt: Date.now(), lastTriggeredAt: null, armed: true });
-  db().rules.push(rule);
+  u.rules.push(rule);
   save();
   return rule;
 }
 
-export function updateRule(ruleId, input) {
-  const rules = db().rules;
+export function updateRule(u, ruleId, input) {
+  const rules = u.rules;
   const i = rules.findIndex((r) => r.id === ruleId);
   if (i < 0) return null;
   const { id: _i, createdAt: _c, ...rest } = input;
@@ -80,12 +84,19 @@ export function updateRule(ruleId, input) {
   return rules[i];
 }
 
-export function deleteRule(ruleId) {
-  const before = db().rules.length;
-  db().rules = db().rules.filter((r) => r.id !== ruleId);
+export function deleteRule(u, ruleId) {
+  const before = u.rules.length;
+  u.rules = u.rules.filter((r) => r.id !== ruleId);
+  // drop engine state for the rule too
+  const st = db().state;
+  if (st.newsSeen) delete st.newsSeen[ruleId];
+  if (st.earnings) delete st.earnings[ruleId];
   save();
-  return db().rules.length !== before;
+  return u.rules.length !== before;
 }
+
+/** Every enabled rule across all profiles, paired with its owner. */
+const ownedRules = (pred) => allUsers().flatMap((u) => u.rules.filter((r) => r.enabled && pred(r)).map((r) => ({ u, r })));
 
 export function describeRule(r) {
   const p = r.params || {};
@@ -149,11 +160,13 @@ function message(rule, q) {
 const cooledDown = (rule) =>
   !rule.lastTriggeredAt || Date.now() - rule.lastTriggeredAt >= config.alertCooldownMinutes * 60_000;
 
-export async function evaluateQuoteRules({ force = false } = {}) {
-  const rules = db().rules.filter((r) => r.enabled && QUOTE_TYPES.has(r.type));
+/** `only`: restrict to one profile (used by the manual "run now" endpoint). */
+export async function evaluateQuoteRules({ force = false, only = null } = {}) {
+  const rules = ownedRules((r) => QUOTE_TYPES.has(r.type)).filter((x) => !only || x.u.id === only.id);
   if (!rules.length) return 0;
+  // one quote fetch per symbol, however many people watch it
   const keys = new Map();
-  for (const r of rules) {
+  for (const { r } of rules) {
     if (!force && config.respectMarketHours && !isOpen(r.market)) continue;
     keys.set(`${r.market}:${r.symbol}`, { market: r.market, symbol: r.symbol });
   }
@@ -161,7 +174,7 @@ export async function evaluateQuoteRules({ force = false } = {}) {
   const qs = await fetchQuotes([...keys.values()]);
   const byKey = new Map(qs.map((q) => [`${q.market}:${q.symbol}`, q]));
   let fired = 0;
-  for (const r of rules) {
+  for (const { u, r } of rules) {
     const q = byKey.get(`${r.market}:${r.symbol}`);
     if (!q || q.error) continue;
     const hit = condition(r, q);
@@ -174,18 +187,18 @@ export async function evaluateQuoteRules({ force = false } = {}) {
     r.lastTriggeredAt = Date.now();
     save();
     const m = message(r, q);
-    await deliver({ rule: r, ...m });
+    await deliver({ user: u, rule: r, ...m });
     fired++;
   }
   return fired;
 }
 
 export async function evaluateNewsRules() {
-  const rules = db().rules.filter((r) => r.enabled && r.type === 'news');
+  const rules = ownedRules((r) => r.type === 'news');
   const state = (db().state.newsSeen ||= {});
   let fired = 0;
-  for (const r of rules) {
-    const item = db().watchlist.find((w) => w.market === r.market && w.symbol === r.symbol) || r;
+  for (const { u, r } of rules) {
+    const item = u.watchlist.find((w) => w.market === r.market && w.symbol === r.symbol) || r;
     let news;
     try {
       news = await newsFor(item);
@@ -215,6 +228,7 @@ export async function evaluateNewsRules() {
     r.lastTriggeredAt = Date.now();
     save();
     await deliver({
+      user: u,
       rule: r,
       title: `📰 ${mood} news: ${r.symbol}`,
       body: hits.length === 1 ? hits[0].title : `${hits.length} new headlines — "${hits[0].title}"`,
@@ -227,10 +241,10 @@ export async function evaluateNewsRules() {
 }
 
 export async function evaluateEarningsRules() {
-  const rules = db().rules.filter((r) => r.enabled && r.type === 'earnings' && r.market !== 'CRYPTO');
+  const rules = ownedRules((r) => r.type === 'earnings' && r.market !== 'CRYPTO');
   const state = (db().state.earnings ||= {});
   let fired = 0;
-  for (const r of rules) {
+  for (const { u, r } of rules) {
     let e;
     try {
       e = await earningsWithSummary(r.market, r.symbol);
@@ -245,6 +259,7 @@ export async function evaluateEarningsRules() {
     // 1) new results published since we last looked
     if (latestKey && st.latestKey && latestKey !== st.latestKey) {
       await deliver({
+        user: u,
         rule: r,
         title: `💼 ${r.symbol} earnings reported`,
         body: e.summary.lines[0],
@@ -262,6 +277,7 @@ export async function evaluateEarningsRules() {
       if (daysAway >= -0.5 && daysAway <= r.params.daysBefore + 0.5 && st.remindedFor !== dateKey) {
         st.remindedFor = dateKey;
         await deliver({
+          user: u,
           rule: r,
           title: `🗓️ ${r.symbol} reports earnings ${daysAway < 1 ? 'today/tomorrow' : `in ${Math.round(daysAway)} days`}`,
           body: e.summary.lines.find((l) => l.startsWith('Next earnings')) || `Earnings on ${dateKey}.`,

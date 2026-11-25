@@ -27,7 +27,11 @@ export const config = {
     pass: process.env.SMTP_PASS || '',
     from: process.env.SMTP_FROM || process.env.SMTP_USER || '',
   },
+  // Only used for the profile that claims pre-profiles data (the server owner);
+  // everyone else sets their own address in the app.
   alertEmail: process.env.ALERT_EMAIL || '',
+  // Cap on how many phone profiles the server will create
+  maxUsers: num(process.env.MAX_USERS, 200),
 
   dataFile: process.env.DATA_FILE || new URL('../data/db.json', import.meta.url),
 };

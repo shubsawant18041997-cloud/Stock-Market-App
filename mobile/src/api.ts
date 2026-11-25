@@ -1,5 +1,6 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import Constants from 'expo-constants';
+import * as Crypto from 'expo-crypto';
 
 export type Market = 'US' | 'IN' | 'CRYPTO';
 export const MARKETS: { key: Market; label: string }[] = [
@@ -112,8 +113,37 @@ export async function setConnection(c: Connection) {
   await AsyncStorage.setItem(KEY, JSON.stringify(conn));
 }
 
+// ------------------------------------------------------------------ profile
+// Each install gets a random profile id; the server keeps this phone's
+// watchlist, alerts and settings under it. No account or login needed.
+
+const PROFILE_KEY = 'profileId.v1';
+let profileId: string | null = null;
+
+export const isValidProfileId = (s: string) => /^[A-Za-z0-9-]{16,64}$/.test(s.trim());
+
+export async function getProfileId(): Promise<string> {
+  if (profileId) return profileId;
+  const saved = await AsyncStorage.getItem(PROFILE_KEY).catch(() => null);
+  if (saved && isValidProfileId(saved)) {
+    profileId = saved;
+  } else {
+    profileId = Crypto.randomUUID();
+    await AsyncStorage.setItem(PROFILE_KEY, profileId);
+  }
+  return profileId;
+}
+
+/** Switch this phone to another profile id (e.g. restoring on a new phone). */
+export async function setProfileId(id: string) {
+  const v = id.trim();
+  if (!isValidProfileId(v)) throw new Error('That does not look like a profile ID.');
+  profileId = v;
+  await AsyncStorage.setItem(PROFILE_KEY, v);
+}
+
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
-  const { serverUrl, apiKey } = await getConnection();
+  const [{ serverUrl, apiKey }, uid] = await Promise.all([getConnection(), getProfileId()]);
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 15000);
   try {
@@ -121,6 +151,7 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
       method,
       headers: {
         'Content-Type': 'application/json',
+        'x-user-id': uid,
         ...(apiKey ? { 'x-api-key': apiKey } : {}),
       },
       body: body ? JSON.stringify(body) : undefined,

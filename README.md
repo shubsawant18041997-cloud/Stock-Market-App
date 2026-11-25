@@ -31,6 +31,22 @@ Providers live in `server/src/providers/`. To move to a paid live feed
 - **Earnings summary**. Last EPS vs estimate and surprise %, beat rate over the last 4 quarters, quarterly revenue change, and the next report date.
 - **Alerts are edge-triggered**. A rule fires once when its condition becomes true, then re-arms only after the condition goes false again, plus a cooldown (`ALERT_COOLDOWN_MINUTES`). Stocks are only polled while their market is open.
 
+## Personal profiles (one per phone)
+
+There are no accounts. On first launch the app creates a random profile ID and
+sends it as the `x-user-id` header. Each profile has its own **watchlist, alert
+rules, alert history, alert email and push devices**. Prices, market news and
+macro data are shared by everyone, and each symbol is fetched once however many
+people watch it.
+
+- **Settings → Your profile** shows the ID. Share or copy it to keep a backup,
+  and paste it under "Restore a profile" on a new phone or after a reinstall.
+- Data from before profiles existed is given to the **first phone that connects**.
+- `MAX_USERS` (default 200) caps how many profiles the server creates. Each
+  profile is limited to 100 watchlist symbols and 100 alerts.
+- A profile ID works like a password for that profile. Anyone who has it can
+  see and edit that watchlist, so share it only with yourself.
+
 ## App tabs
 
 | Tab | What it shows |

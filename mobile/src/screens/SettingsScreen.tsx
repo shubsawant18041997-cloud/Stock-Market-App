@@ -1,7 +1,7 @@
 import React, { useCallback, useState } from 'react';
-import { View, Text, TextInput, ScrollView, StyleSheet, Switch, Alert } from 'react-native';
+import { View, Text, TextInput, ScrollView, StyleSheet, Switch, Alert, Share } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
-import { api, getConnection, setConnection } from '../api';
+import { api, getConnection, setConnection, getProfileId, setProfileId, isValidProfileId } from '../api';
 import { registerForPush } from '../notifications';
 import { colors } from '../theme';
 import { Card, SectionTitle, Button, ErrorText } from '../components';
@@ -15,11 +15,14 @@ export default function SettingsScreen() {
   const [status, setStatus] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
   const [pushMsg, setPushMsg] = useState<string | null>(null);
+  const [profile, setProfile] = useState('');
+  const [restoreId, setRestoreId] = useState('');
 
   const load = useCallback(async () => {
     const c = await getConnection();
     setServerUrl(c.serverUrl);
     setApiKey(c.apiKey);
+    setProfile(await getProfileId());
     try {
       const [s, st] = await Promise.all([api.settings(), api.status()]);
       setEmail(s.email || '');
@@ -60,6 +63,29 @@ export default function SettingsScreen() {
     load();
   };
 
+  const restore = () => {
+    Alert.alert(
+      'Switch profile?',
+      "This phone will show that profile's watchlist and alerts. Save your current ID first if you want to come back to it.",
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Switch',
+          onPress: async () => {
+            try {
+              await setProfileId(restoreId);
+              setRestoreId('');
+              registerForPush().catch(() => {}); // move this phone's push alerts to the new profile
+              load();
+            } catch (e: any) {
+              Alert.alert('Could not switch', e.message);
+            }
+          },
+        },
+      ]
+    );
+  };
+
   const test = async () => {
     try {
       const r = await api.testNotification();
@@ -84,9 +110,23 @@ export default function SettingsScreen() {
         <ErrorText error={error} />
         {status && (
           <Text style={styles.ok}>
-            ✓ Connected · {status.counts.watchlist} symbols · {status.counts.rules} alerts · {status.push.devices} push device(s)
+            ✓ Connected · {status.counts?.watchlist ?? 0} symbols · {status.counts?.rules ?? 0} alerts · {status.push.devices} push device(s)
           </Text>
         )}
+      </Card>
+
+      <SectionTitle>Your profile</SectionTitle>
+      <Card>
+        <Text style={styles.note}>
+          Your watchlist, alerts and email are private to this profile. Keep this ID to restore them on a new phone or after reinstalling.
+        </Text>
+        <Text style={styles.profileId} selectable>
+          {profile}
+        </Text>
+        <Button title="Share / copy ID" kind="ghost" onPress={() => Share.share({ message: profile })} style={{ marginBottom: 14 }} />
+        <Text style={styles.label}>Restore a profile</Text>
+        <TextInput style={styles.input} value={restoreId} onChangeText={setRestoreId} autoCapitalize="none" autoCorrect={false} placeholder="Paste a profile ID" placeholderTextColor={colors.muted} />
+        <Button title="Switch to this profile" kind="ghost" disabled={!isValidProfileId(restoreId) || restoreId.trim() === profile} onPress={restore} />
       </Card>
 
       <SectionTitle>Email alerts</SectionTitle>
@@ -140,5 +180,15 @@ const styles = StyleSheet.create({
   ok: { color: colors.up, marginTop: 10, fontSize: 13 },
   warn: { color: colors.warn, fontSize: 13, marginBottom: 10, lineHeight: 18 },
   note: { color: colors.muted, marginTop: 8, fontSize: 13, lineHeight: 18 },
+  profileId: {
+    color: colors.text,
+    fontFamily: 'monospace',
+    fontSize: 13,
+    backgroundColor: colors.cardAlt,
+    borderRadius: 8,
+    padding: 10,
+    marginVertical: 10,
+    overflow: 'hidden',
+  },
   footer: { color: colors.muted, fontSize: 11, textAlign: 'center', marginTop: 24, lineHeight: 16 },
 });
