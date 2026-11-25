@@ -1,0 +1,48 @@
+{
+  "expo": {
+    "name": "Stock Tracker",
+    "slug": "stock-tracker",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "backgroundColor": "#0b0f17",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.stocktracker.app",
+      "infoPlist": {
+        "NSAppTransportSecurity": {
+          "NSAllowsLocalNetworking": true
+        }
+      }
+    },
+    "android": {
+      "package": "com.stocktracker.app",
+      "adaptiveIcon": {
+        "backgroundColor": "#0b0f17",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "predictiveBackGestureEnabled": false
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      [
+        "expo-notifications",
+        {
+          "color": "#4c8dff",
+          "defaultChannel": "alerts"
+        }
+      ],
+      [
+        "expo-build-properties",
+        {
+          "android": { "usesCleartextTraffic": true }
+        }
+      ]
+    ]
+  }
+}
