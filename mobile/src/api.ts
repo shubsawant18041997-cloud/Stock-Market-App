@@ -202,6 +202,7 @@ export const api = {
 
   marketNews: (category: NewsCategory) => request<{ items: MarketStory[] }>('GET', `/api/market-news?category=${category}&limit=60`),
   macroOverview: () => request<FactorQuote[]>('GET', '/api/macro/overview'),
+  factorSeries: (id: string) => request<FactorSeries>('GET', `/api/macro/series/${enc(id)}`),
   correlations: (preset: string, window: string) =>
     request<CorrelationMatrix>('GET', `/api/macro/correlations?preset=${preset}&window=${window}`),
   /** market: US | IN | CRYPTO | FACTOR */
@@ -241,7 +242,14 @@ export type FactorQuote = {
   changePct: number | null;
   currency: string | null;
   error: string | null;
+  kind?: 'price' | 'level';
+  /** ~30 recent daily closes, last point = live price */
+  spark?: number[];
+  /** % change for prices, point change for levels (yields, VIX) */
+  perf?: Partial<Record<'1W' | '1M' | '3M' | '1Y', number | null>>;
 };
+
+export type FactorSeries = { id: string; name: string; kind: 'price' | 'level'; unit: string; points: { date: string; c: number }[] };
 
 export type CorrelationMatrix = {
   window: string;

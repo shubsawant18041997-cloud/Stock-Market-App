@@ -127,23 +127,53 @@ export function strength(r) {
 
 // ---------------------------------------------------------------- public API
 
+const PERF_DAYS = { '1W': 5, '1M': 21, '3M': 63, '1Y': 252 };
+
+/** Change from `days` sessions ago to `price`: % for prices, points for levels (yields, VIX). */
+function perfFrom(points, price, kind) {
+  const out = {};
+  for (const [k, days] of Object.entries(PERF_DAYS)) {
+    const base = points.length > days ? points[points.length - 1 - days].c : null;
+    out[k] = base && price != null ? Number((kind === 'level' ? price - base : (price / base - 1) * 100).toFixed(2)) : null;
+  }
+  return out;
+}
+
 export async function overview() {
-  const res = await mapLimit(FACTORS, 6, (f) => yahoo.quote('GLOBAL', f.yahoo));
+  const [res, hist] = await Promise.all([
+    mapLimit(FACTORS, 6, (f) => yahoo.quote('GLOBAL', f.yahoo)),
+    mapLimit(FACTORS, 6, (f) => yahoo.dailySeries(f.yahoo, '2y')), // cached 30 min, shared with correlations
+  ]);
   return FACTORS.map((f, i) => {
     const q = res[i].ok ? res[i].value : null;
+    const pts = hist[i].ok ? hist[i].value.points : [];
+    const price = q?.price ?? pts.at(-1)?.c ?? null;
+    const spark = pts.slice(-30).map((p) => p.c);
+    if (spark.length && price != null) spark[spark.length - 1] = price; // end the line at the live price
     return {
       id: f.id,
       name: f.name,
       group: f.group,
+      kind: f.kind,
       unit: f.unit || '',
-      price: q?.price ?? null,
+      price,
       change: q?.change ?? null,
       changePct: q?.changePct ?? null,
       currency: q?.currency ?? null,
       time: q?.time ?? null,
+      spark,
+      perf: perfFrom(pts, price, f.kind),
       error: res[i].ok ? null : res[i].error?.message,
     };
   });
+}
+
+/** Last year of daily closes for one factor (for the focus chart). */
+export async function factorSeries(id) {
+  const f = FACTOR_BY_ID.get(String(id).toUpperCase());
+  if (!f) throw bad(`unknown factor ${id}`);
+  const s = await yahoo.dailySeries(f.yahoo, '2y');
+  return { id: f.id, name: f.name, kind: f.kind, unit: f.unit || '', points: s.points.slice(-253) };
 }
 
 export async function matrix(keys, windowKey = '90') {

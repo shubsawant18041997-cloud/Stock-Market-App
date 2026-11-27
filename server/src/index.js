@@ -170,6 +170,8 @@ app.get('/api/macro/factors', (_req, res) => res.json({ factors: macro.FACTORS, 
 
 app.get('/api/macro/overview', wrap(async (_req, res) => res.json(await macro.overview())));
 
+app.get('/api/macro/series/:id', wrap(async (req, res) => res.json(await macro.factorSeries(req.params.id))));
+
 app.get('/api/macro/correlations', wrap(async (req, res) => {
   // ?preset=core | ?keys=F:GOLD,F:DXY,US:AAPL  | ?preset=watchlist
   let keys;

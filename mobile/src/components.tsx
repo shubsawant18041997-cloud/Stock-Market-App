@@ -199,6 +199,41 @@ export function LineChart({ points, width, height = 180, color }: { points: numb
   );
 }
 
+/** Tiny trend line for tiles: no axes, optional dashed baseline at the first value. */
+export function Sparkline({ points, width, height = 26, color, baseline = true }: { points: number[]; width: number; height?: number; color: string; baseline?: boolean }) {
+  if (points.length < 2 || width <= 0) return <View style={{ height }} />;
+  const min = Math.min(...points);
+  const max = Math.max(...points);
+  const span = max - min || 1;
+  const pad = 2;
+  const x = (i: number) => (i / (points.length - 1)) * width;
+  const y = (v: number) => pad + (1 - (v - min) / span) * (height - pad * 2);
+  const line = points.map((v, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' ');
+  const by = y(points[0]).toFixed(1);
+  return (
+    <Svg width={width} height={height}>
+      {baseline && <Path d={`M0,${by} L${width},${by}`} stroke={colors.border} strokeWidth={1} strokeDasharray="2,3" />}
+      <Path d={line} stroke={color} strokeWidth={1.6} fill="none" strokeLinejoin="round" strokeLinecap="round" />
+    </Svg>
+  );
+}
+
+/** Pulsing grey block shown while content loads. */
+export function Skeleton({ style }: { style?: StyleProp<ViewStyle> }) {
+  const v = useRef(new Animated.Value(0.45)).current;
+  useEffect(() => {
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(v, { toValue: 1, duration: 700, useNativeDriver: true }),
+        Animated.timing(v, { toValue: 0.45, duration: 700, useNativeDriver: true }),
+      ])
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [v]);
+  return <Animated.View style={[{ backgroundColor: colors.cardAlt, borderRadius: 10, opacity: v }, style]} />;
+}
+
 /** Correlation colour: red (-1) .. grey (0) .. green (+1). */
 export function corrColor(r: number | null | undefined) {
   if (r == null) return colors.cardAlt;
