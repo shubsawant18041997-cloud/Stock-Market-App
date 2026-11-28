@@ -117,7 +117,7 @@ export default function DetailScreen() {
       />
 
       <SectionTitle>What drives it</SectionTitle>
-      <DriversList market={market} symbol={symbol} limit={5} />
+      <DriversList market={market} symbol={symbol} />
 
       {market !== 'CRYPTO' && (
         <>

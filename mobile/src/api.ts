@@ -201,6 +201,7 @@ export const api = {
   testNotification: () => request<any>('POST', '/api/test-notification'),
 
   marketNews: (category: NewsCategory) => request<{ items: MarketStory[] }>('GET', `/api/market-news?category=${category}&limit=60`),
+  factorNews: (id: string) => request<{ id: string; items: MarketStory[] }>('GET', `/api/macro/news/${enc(id)}`),
   macroOverview: () => request<FactorQuote[]>('GET', '/api/macro/overview'),
   factorSeries: (id: string) => request<FactorSeries>('GET', `/api/macro/series/${enc(id)}`),
   correlations: (preset: string, window: string) =>
@@ -274,7 +275,40 @@ export type Driver = {
   explanation: string;
 };
 
-export type DriversResponse = { target: { key: string; label: string; name: string }; window: string; drivers: Driver[] };
+export type KeyDriver = {
+  key: string;
+  id: string;
+  name: string;
+  group: string;
+  kind: string;
+  lag: 0 | 1;
+  r: number;
+  beta: number;
+  /** this driver's slice of the explained daily variance (0..1; slices sum to r2) */
+  share: number;
+  /** part of the period's move attributed to this driver, in `unit` */
+  contribution: number;
+  sensitivity: string;
+};
+
+export type KeyDrivers = {
+  n: number;
+  from: string;
+  to: string;
+  r2: number;
+  unit: '%' | 'pts' | 'bp';
+  total: number;
+  other: number;
+  drivers: KeyDriver[];
+  summary: string;
+};
+
+export type DriversResponse = {
+  target: { key: string; label: string; name: string };
+  window: string;
+  key?: KeyDrivers | null;
+  drivers: Driver[];
+};
 
 export type PairResponse = {
   a: { key: string; label: string; name: string };

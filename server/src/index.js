@@ -11,7 +11,7 @@ import { deliver, alertEmail } from './notify.js';
 import { startScheduler, schedulerStatus } from './scheduler.js';
 import { sessionStatus } from './marketHours.js';
 import * as macro from './macro.js';
-import { marketNews, NEWS_CATEGORIES } from './marketNews.js';
+import { marketNews, NEWS_CATEGORIES, factorNews } from './marketNews.js';
 
 const app = express();
 app.use(cors());
@@ -171,6 +171,8 @@ app.get('/api/macro/factors', (_req, res) => res.json({ factors: macro.FACTORS, 
 app.get('/api/macro/overview', wrap(async (_req, res) => res.json(await macro.overview())));
 
 app.get('/api/macro/series/:id', wrap(async (req, res) => res.json(await macro.factorSeries(req.params.id))));
+
+app.get('/api/macro/news/:id', wrap(async (req, res) => res.json(await factorNews(req.params.id, Math.min(Number(req.query.limit) || 5, 10)))));
 
 app.get('/api/macro/correlations', wrap(async (req, res) => {
   // ?preset=core | ?keys=F:GOLD,F:DXY,US:AAPL  | ?preset=watchlist

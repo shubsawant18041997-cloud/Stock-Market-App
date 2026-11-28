@@ -87,7 +87,7 @@ function jaccard(a, b) {
 }
 
 async function fetchFeed(f) {
-  const url = `https://news.google.com/rss/search?${qs({ q: `${f.q} when:1d`, ...f.region })}`;
+  const url = `https://news.google.com/rss/search?${qs({ q: `${f.q} when:${f.when || '1d'}`, ...f.region })}`;
   const doc = xml.parse(await getText(url));
   let items = doc?.rss?.channel?.item || [];
   if (!Array.isArray(items)) items = [items];
@@ -172,6 +172,13 @@ async function buildFeed() {
     .filter((n) => !RELEVANT[n.category] || RELEVANT[n.category].test(n.title));
   if (!raw.length) throw new Error(results.find((r) => !r.ok)?.error?.message || 'no news available');
 
+  const built = buildStories(raw);
+  return { stories: built, partial: failed.length > 0 };
+}
+
+
+/** Cluster near-duplicate headlines from different outlets into stories and score them. */
+function buildStories(raw) {
   // cluster near-duplicate headlines into stories
   const stories = [];
   for (const n of raw.sort((a, b) => b.time - a.time)) {
@@ -187,7 +194,7 @@ async function buildFeed() {
     stories.push({ ...n, tokens: tk, sources: new Set([n.source]), categories: new Set([n.category]), related: [] });
   }
 
-  const built = stories.map((s) => {
+  return stories.map((s) => {
     const sentiment = scoreText(s.title);
     const base = baseScore({ ...s, sentiment });
     const { assets, why } = impacts(s.title);
@@ -207,7 +214,6 @@ async function buildFeed() {
       related: s.related,
     };
   });
-  return { stories: built, partial: failed.length > 0 };
 }
 
 // Full results are cached 5 min; if some feeds failed, only 1 min so the gap heals quickly.
@@ -251,3 +257,83 @@ function diversify(list, limit, mixCategories) {
 }
 
 export const NEWS_CATEGORIES = ['all', 'macro', 'us', 'india', 'crypto', 'commodities', 'watchlist'];
+
+// ---------------------------------------------------------------- per-factor headlines (Macro tab)
+
+// One focused search per macro factor; `re` keeps only headlines really about it.
+const FACTOR_NEWS = {
+  SPX: { region: US, q: '"S&P 500" OR "Wall Street" OR "US stocks"', re: /\b(s&p|wall street|us stocks|stocks?|equities)\b/i },
+  // about the index, not one company or ETF that happens to list on Nasdaq
+  NDX: { region: US, q: 'Nasdaq OR "tech stocks" OR "chip stocks"', re: /\b(nasdaq|tech stocks|chip stocks|ai stocks|semiconductor stocks)\b/i, ex: /\((nasdaq|nyse):|\betf\b|\bshares (surge|jump|fall|drop|soar|plunge)/i },
+  NIFTY: { region: IN, q: 'Nifty OR "Nifty 50" OR "Indian stock market"', re: /\b(nifty|dalal street|indian (stocks?|markets?|shares))\b/i },
+  SENSEX: { region: IN, q: 'Sensex OR "Dalal Street"', re: /\b(sensex|dalal street)\b/i },
+  BANKNIFTY: { region: IN, q: '"Bank Nifty" OR "bank stocks" OR "PSU banks"', re: /\b(bank nifty|nifty bank|psu banks?|private banks?|indian banks?|sbi|hdfc bank|icici bank|axis bank|kotak)\b/i },
+  VIX: { region: US, q: 'VIX OR "volatility index" OR "fear gauge"', re: /\b(vix|volatility|fear gauge)\b/i },
+  INDIAVIX: { region: IN, q: '"India VIX" OR "volatility index" India', re: /\b(india vix|vix|volatility)\b/i },
+  US10Y: {
+    region: US,
+    q: '"Treasury yields" OR "10-year yield" OR "bond market" OR "Federal Reserve"',
+    re: /\b(treasur(y|ies)|10-year|yields?|bond market|fed|federal reserve|powell|fomc)\b/i,
+    ex: /\b(india|rbi|bund|german|french|japan|jgb|gold|silver|xrp|bitcoin|crypto)\b/i, // other countries' bonds, other assets
+  },
+  DXY: { region: US, q: '"dollar index" OR "US dollar" OR greenback', re: /\b(dollar|greenback|dxy|currenc(y|ies))\b/i },
+  USDINR: { region: IN, q: 'rupee dollar OR "rupee falls" OR "rupee rises" OR "RBI forex"', re: /\b(rupee|inr|forex|rbi)\b/i },
+  GOLD: { region: US, q: '"gold price" OR "gold prices" OR bullion', re: /\b(gold|bullion)\b/i },
+  SILVER: { region: US, q: '"silver price" OR "silver prices"', re: /\bsilver\b/i },
+  WTI: { region: US, q: '"crude oil" OR "oil prices" OR WTI OR OPEC', re: /\b(crude|oil|opec\+?|wti)\b/i },
+  BRENT: { region: US, q: '"Brent crude" OR "oil prices" OR OPEC', re: /\b(brent (crude|oil|futures|prices?)|crude|oil|opec\+?)\b/i },
+  NATGAS: { region: US, q: '"natural gas prices" OR "natural gas futures" OR LNG', re: /\b(natural gas|gas (prices?|futures)|lng (prices?|exports?|imports?|supply|shipments?))\b/i },
+  COPPER: { region: US, q: '"copper price" OR "copper prices" OR "copper futures"', re: /\bcopper\b/i },
+  BTC: { region: US, q: 'bitcoin', re: /\b(bitcoin|btc)\b/i },
+  ETH: { region: US, q: 'ethereum OR ether', re: /\b(ethereum|ether|eth)\b/i },
+};
+
+// Price-listing pages, tips and explainers are not news about the market moving.
+const JUNK = /\b(rate today|price today|prices? on \d|rates? on \d|check (latest|today)|22k|24k|per (gram|tola|bhori)|bhori|stocks? to buy|buy or sell|should you buy|target price|stoploss|stop loss|explained|explainer|how to|what is|prediction|technical analysis|weekly recap|stock price, news|quote and history)\b/i;
+const STRONG_MOVE = /\b(crash(es|ed)?|plunges?|plummets?|tanks?|tumbles?|slumps?|sinks?|soars?|surges?|skyrockets?|spikes?|nosedives?|rout|sell-?off|meltdown|record|all-time high|lifetime high|highest|lowest|biggest|worst|best day)\b/i;
+const MOVE = /\b(rises?|falls?|drops?|jumps?|gains?|climbs?|rebounds?|rall(y|ies)|slips?|sheds?|declines?|retreats?|snaps?|extends?|streak|tops?|breaks?|below|above)\b/i;
+const SIZE = /(\d+(\.\d+)?\s?%|\b\d{1,3}(,\d{3})+\s?(pts|points)\b|\b\d{3,}\s?(pts|points)\b|\$\d)/i;
+
+/** Importance of a headline for one factor (0-100): coverage, a real move, its size, a catalyst, recency. */
+function factorScore(s) {
+  const t = s.title;
+  let topic = 0;
+  for (const [re, w] of IMPACT_TERMS) if (re.test(t.toLowerCase())) topic += w;
+  const ageH = (Date.now() - s.time) / 3600_000;
+  return Math.round(
+    Math.min(30, (s.coverage - 1) * 8) +
+      (STRONG_MOVE.test(t) ? 20 : MOVE.test(t) ? 10 : 0) +
+      (SIZE.test(t) ? 8 : 0) +
+      Math.min(20, topic) +
+      Math.max(0, 15 * (1 - ageH / 48)) +
+      Math.min(7, Math.abs(s.sentiment.score) * 10)
+  );
+}
+
+const BIG = 35; // minimum factorScore to count as a big headline
+
+/** Big headlines from the last 2 days for one macro factor (empty list if nothing major). */
+export async function factorNews(id, limit = 4) {
+  const key = String(id).toUpperCase();
+  const cfg = FACTOR_NEWS[key];
+  if (!cfg) throw Object.assign(new Error(`unknown factor ${id}`), { status: 400 });
+  return cached(`factorNews:${key}`, 10 * 60_000, async () => {
+    const raw = (await fetchFeedRetry({ ...cfg, when: '2d', category: 'factor' })).filter(
+      (n) => n.title && cfg.re.test(n.title) && !(cfg.ex && cfg.ex.test(n.title)) && !JUNK.test(n.title)
+    );
+    const stories = personalise(buildStories(raw), [])
+      .map((s) => {
+        const importance = Math.min(100, factorScore(s));
+        return { ...s, importance, level: level(importance) };
+      })
+      .filter((s) => s.importance >= BIG)
+      .sort((a, b) => b.importance - a.importance);
+    // same event from two outlets in different words: keep the stronger one
+    const kept = [];
+    for (const s of stories) {
+      const tk = tokens(s.title);
+      if (!kept.some((k) => jaccard(k.tk, tk) >= 0.3)) kept.push({ s, tk });
+    }
+    return { id: key, items: kept.slice(0, limit).map((k) => k.s) };
+  });
+}

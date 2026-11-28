@@ -241,7 +241,209 @@ export async function drivers(targetKey, windowKey = '90') {
   });
   const list = res.filter((x) => x.ok && x.value).map((x) => x.value).sort((a, b) => Math.abs(b.r) - Math.abs(a.r));
   for (const d of list) d.explanation = explain(target, d);
-  return { target: { key: target.key, label: target.label, name: target.name }, window: windowKey, drivers: list };
+  let key = null;
+  try {
+    const series = new Map();
+    await mapLimit(list, 6, async (d) => series.set(d.key, await load(resolveKey(d.key)))); // cached
+    key = keyDrivers(target, ts, list, series, window);
+  } catch (e) {
+    console.warn('[macro] key drivers failed', target.key, e.message);
+  }
+  return { target: { key: target.key, label: target.label, name: target.name }, window: windowKey, key, drivers: list };
+}
+
+// ---------------------------------------------------------------- key drivers
+//
+// The pairwise list above ranks each factor on its own, so near-duplicates
+// (S&P 500 / Nasdaq, WTI / Brent, Nifty / Sensex) crowd the top. Here we pick
+// a small set of *independent* drivers with forward stepwise regression: start
+// with the factor that explains the most of the asset's daily moves, then keep
+// adding the one that explains the most of what is left, until the gain is
+// small. The asset's move over the window is then split into each driver's
+// contribution (beta x driver's move) plus an asset-specific remainder.
+
+const MIN_GAIN = 0.02; // a driver must add >= 2 points of R²...
+const MIN_F = 4; // ...and pass a partial F-test (~p < 0.05), so weak noise isn't listed as a driver
+
+// For a macro factor target, its near-twin would always "explain" it (Nifty by Sensex, Gold by Silver),
+// which is true but tells nothing new, so twins are left out of its key drivers.
+const TWINS = [['SPX', 'NDX'], ['NIFTY', 'SENSEX'], ['NIFTY', 'BANKNIFTY'], ['SENSEX', 'BANKNIFTY'], ['WTI', 'BRENT'], ['GOLD', 'SILVER'], ['BTC', 'ETH'], ['VIX', 'INDIAVIX']];
+const isTwin = (a, b) => TWINS.some(([x, y]) => (x === a && y === b) || (x === b && y === a));
+
+/** Closes of `s` as of each date (last close on or before it). */
+function asOf(s, dates) {
+  const pts = s.points;
+  const out = new Array(dates.length);
+  let j = -1;
+  for (let i = 0; i < dates.length; i++) {
+    while (j + 1 < pts.length && pts[j + 1].date <= dates[i]) j++;
+    out[i] = j >= 0 && pts[j].c > 0 ? pts[j].c : null;
+  }
+  return out;
+}
+
+/** OLS with intercept. cols: arrays the same length as y. Returns betas, R² and column means. */
+function ols(cols, y) {
+  const n = y.length, k = cols.length;
+  const mean = (a) => a.reduce((s, v) => s + v, 0) / n;
+  const my = mean(y);
+  const mx = cols.map(mean);
+  const M = Array.from({ length: k }, () => new Array(k + 1).fill(0));
+  for (let t = 0; t < n; t++) {
+    for (let i = 0; i < k; i++) {
+      const xi = cols[i][t] - mx[i];
+      M[i][k] += xi * (y[t] - my);
+      for (let j = 0; j < k; j++) M[i][j] += xi * (cols[j][t] - mx[j]);
+    }
+  }
+  // Gauss-Jordan with partial pivoting (k is tiny)
+  for (let c = 0; c < k; c++) {
+    let p = c;
+    for (let r = c + 1; r < k; r++) if (Math.abs(M[r][c]) > Math.abs(M[p][c])) p = r;
+    if (Math.abs(M[p][c]) < 1e-18) return null;
+    [M[c], M[p]] = [M[p], M[c]];
+    for (let r = 0; r < k; r++) {
+      if (r === c) continue;
+      const f = M[r][c] / M[c][c];
+      for (let j = c; j <= k; j++) M[r][j] -= f * M[c][j];
+    }
+  }
+  const beta = M.map((row, i) => row[k] / row[i]);
+  let sse = 0, sst = 0;
+  for (let t = 0; t < n; t++) {
+    let fit = my;
+    for (let i = 0; i < k; i++) fit += beta[i] * (cols[i][t] - mx[i]);
+    sse += (y[t] - fit) ** 2;
+    sst += (y[t] - my) ** 2;
+  }
+  if (!sst) return null;
+  return { beta, r2: 1 - sse / sst, mx, my };
+}
+
+function keyDrivers(target, ts, list, series, window) {
+  const dates = ts.points.map((p) => p.date);
+  const tc = ts.points.map((p) => p.c);
+  // y[i] = target's move from dates[i] to dates[i+1]
+  const y = [];
+  for (let t = 1; t < tc.length; t++) y.push(tc[t] > 0 && tc[t - 1] > 0 ? ret(target.kind, tc[t - 1], tc[t]) : null);
+
+  // one regressor per candidate, aligned to the target's days (shifted a day if the pairwise check chose next-day)
+  const cands = list
+    .filter((d) => Math.abs(d.r) >= 0.1 && series.has(d.key))
+    .filter((d) => !(target.key.startsWith('F:') && isTwin(target.label, d.id)))
+    .map((d) => {
+      const c = asOf(series.get(d.key), dates);
+      const x = [];
+      for (let t = 1; t < c.length; t++) x.push(c[t] != null && c[t - 1] != null ? ret(d.kind, c[t - 1], c[t]) : null);
+      return { d, x: d.lag ? [null, ...x.slice(0, -1)] : x };
+    });
+
+  // days where the target and every candidate have a value; keep the last `window`
+  let rows = [];
+  for (let t = 0; t < y.length; t++) if (y[t] != null && cands.every((c) => c.x[t] != null)) rows.push(t);
+  rows = rows.slice(-window);
+  const n = rows.length;
+  if (n < 20) return null;
+  const Y = rows.map((t) => y[t]);
+  for (const c of cands) c.X = rows.map((t) => c.x[t]);
+
+  const maxK = window >= 90 ? 5 : 3; // fewer drivers on short windows to avoid overfitting
+  const adj = (q, kk) => 1 - ((1 - q) * (n - 1)) / (n - kk - 1);
+  const chosen = [];
+  let model = null, r2 = 0;
+  while (chosen.length < maxK) {
+    let best = null;
+    for (const c of cands) {
+      if (chosen.includes(c)) continue;
+      const m = ols([...chosen, c].map((q) => q.X), Y);
+      if (!m) continue;
+      // skip picks whose sign flips against their own correlation ("suppressor" effects): unstable and confusing
+      if (Math.sign(m.beta.at(-1)) !== Math.sign(c.d.r)) continue;
+      if (!best || m.r2 > best.m.r2) best = { c, m };
+    }
+    if (!best) break;
+    const k = chosen.length + 1;
+    const gain = best.m.r2 - r2;
+    const F = (gain / Math.max(1e-9, 1 - best.m.r2)) * (n - k - 1);
+    if (gain < MIN_GAIN || F < MIN_F || (chosen.length && adj(best.m.r2, k) <= adj(r2, k - 1))) break;
+    chosen.push(best.c);
+    model = best.m;
+    r2 = best.m.r2;
+  }
+
+  // units: % for prices (log moves rescaled so they add up to the simple % change), points for levels, bp for the 10Y
+  const sumY = Y.reduce((s, v) => s + v, 0);
+  let scale, unit;
+  if (target.kind === 'level') {
+    unit = target.key === 'F:US10Y' ? 'bp' : 'pts';
+    scale = unit === 'bp' ? 100 : 1;
+  } else {
+    unit = '%';
+    const totalPct = (Math.exp(sumY) - 1) * 100;
+    scale = Math.abs(sumY) > 1e-9 ? totalPct / sumY : 100;
+  }
+  const total = sumY * scale;
+
+  const meanY = sumY / n;
+  const varY = Y.reduce((s, v) => s + (v - meanY) ** 2, 0) / n;
+  const drivers = chosen.map((c, i) => {
+    const b = model.beta[i];
+    let cov = 0;
+    for (let t = 0; t < n; t++) cov += (c.X[t] - model.mx[i]) * (Y[t] - meanY);
+    cov /= n;
+    const move = c.X.reduce((s, v) => s + v, 0);
+    return {
+      key: c.d.key,
+      id: c.d.id,
+      name: c.d.name,
+      group: c.d.group,
+      kind: c.d.kind,
+      lag: c.d.lag,
+      r: c.d.r,
+      beta: Number(b.toFixed(4)),
+      share: Number(Math.max(0, (b * cov) / varY).toFixed(3)), // this driver's slice of R² (slices sum to R²)
+      contribution: Number((b * move * scale).toFixed(2)),
+      sensitivity: sensitivity(target, c.d, b, unit),
+    };
+  });
+  const explained = drivers.reduce((s, d) => s + d.contribution, 0);
+  const out = {
+    n,
+    from: dates[rows[0]],
+    to: dates[rows[n - 1] + 1],
+    r2: Number(r2.toFixed(3)),
+    unit,
+    total: Number(total.toFixed(2)),
+    other: Number((total - explained).toFixed(2)),
+    drivers: drivers.sort((a, b) => b.share - a.share),
+  };
+  out.summary = keySummary(target, out);
+  return out;
+}
+
+function fmtMove(v, unit) {
+  const s = `${v >= 0 ? '+' : '−'}${Math.abs(v).toFixed(unit === 'bp' ? 0 : unit === 'pts' ? 2 : 1)}`;
+  return unit === '%' ? `${s}%` : `${s} ${unit}`;
+}
+
+function sensitivity(target, d, beta, unit) {
+  const per = d.kind === 'level' ? (d.id === 'US10Y' ? 0.1 : 1) : 0.01;
+  const perText = d.kind === 'level' ? (d.id === 'US10Y' ? '10 bp rise' : '1 pt rise') : '1% rise';
+  const impact = beta * per * (target.kind === 'level' ? (unit === 'bp' ? 100 : 1) : 100);
+  const when = d.lag ? ' the day before' : '';
+  return `A ${perText} in ${d.id}${when} came with about ${fmtMove(impact, unit)} in ${target.label}, with the other drivers unchanged.`;
+}
+
+function keySummary(target, k) {
+  if (!k.drivers.length || k.r2 < 0.1) {
+    return `Macro factors explain little of ${target.label}'s daily moves in this period (${Math.round(k.r2 * 100)}%). It has mostly moved on its own news, earnings and flows.`;
+  }
+  const parts = k.drivers.map((d) => `${d.name} ${fmtMove(d.contribution, k.unit)}`).join(', ');
+  return (
+    `${target.label} moved ${fmtMove(k.total, k.unit)} in this period: ${parts}, ` +
+    `and ${fmtMove(k.other, k.unit)} specific to ${target.label}. ` +
+    `Together these drivers explain ${Math.round(k.r2 * 100)}% of its day-to-day moves.`
+  );
 }
 
 function explain(target, d) {

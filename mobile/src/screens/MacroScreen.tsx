@@ -1,8 +1,8 @@
 import React, { useCallback, useMemo, useRef, useState } from 'react';
-import { View, Text, ScrollView, Pressable, StyleSheet, RefreshControl, useWindowDimensions, LayoutAnimation, Platform, UIManager } from 'react-native';
+import { View, Text, ScrollView, Pressable, StyleSheet, RefreshControl, useWindowDimensions, LayoutAnimation, Platform, UIManager, Linking } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
-import { api, CorrelationMatrix, FactorQuote, FactorSeries } from '../api';
+import { api, CorrelationMatrix, FactorQuote, FactorSeries, MarketStory } from '../api';
 import { colors, pct, changeColor, timeAgo } from '../theme';
 import {
   Segmented,
@@ -72,6 +72,58 @@ const MOOD_SIGNALS = [
   { id: 'GOLD', w: 0.5, scale: 1, sign: -1 },
   { id: 'DXY', w: 0.5, scale: 0.5, sign: -1 },
 ];
+
+// ---------------------------------------------------------------- big headlines for the focused factor
+
+const SENT_COLOR = { positive: colors.up, negative: colors.down, neutral: colors.muted } as const;
+
+/** Up to 4 major stories from the last 2 days about this factor; a quiet one-liner if there are none. */
+function FactorHeadlines({ id, name }: { id: string; name: string }) {
+  const { data, error, loading } = useAsync<{ items: MarketStory[] }>(() => api.factorNews(id), [id]);
+  const items = data?.items || [];
+
+  return (
+    <>
+      <Text style={styles.subTitle}>Big headlines</Text>
+      {loading && !data ? (
+        <Skeleton style={{ height: 120, borderRadius: 14 }} />
+      ) : error ? (
+        <Card>
+          <ErrorText error={error} />
+        </Card>
+      ) : !items.length ? (
+        <Card style={{ paddingVertical: 12 }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+            <Ionicons name="newspaper-outline" size={16} color={colors.muted} />
+            <Text style={styles.newsQuiet}>No major {name} headlines in the last 2 days.</Text>
+          </View>
+        </Card>
+      ) : (
+        <Card style={{ paddingVertical: 4 }}>
+          {items.map((s, i) => (
+            <Pressable
+              key={s.id}
+              onPress={() => Linking.openURL(s.url)}
+              style={({ pressed }) => [styles.newsRow, i === items.length - 1 && { borderBottomWidth: 0 }, pressed && { opacity: 0.6 }]}
+            >
+              <View style={styles.newsMeta}>
+                <View style={[styles.newsDot, { backgroundColor: SENT_COLOR[s.sentiment.label] }]} />
+                <Text style={styles.newsMetaText} numberOfLines={1}>
+                  {s.source} · {timeAgo(s.time)}
+                  {s.coverage > 1 ? ` · ${s.coverage} outlets` : ''}
+                </Text>
+                {s.level === 'high' && <Badge label="major" color={colors.warn} />}
+              </View>
+              <Text style={styles.newsTitle} numberOfLines={3}>
+                {s.title}
+              </Text>
+            </Pressable>
+          ))}
+        </Card>
+      )}
+    </>
+  );
+}
 
 // ---------------------------------------------------------------- formatting
 
@@ -227,8 +279,9 @@ export default function MacroScreen() {
       <View onLayout={(e) => (focusY.current = e.nativeEvent.layout.y)}>
         <SectionTitle>{targetTile?.name || target}</SectionTitle>
         <FocusCard id={target} tile={targetTile} width={width - 32} />
+        <FactorHeadlines id={target} name={targetTile?.name || target} />
         <Text style={styles.subTitle}>What drives {targetTile?.name || target}?</Text>
-        <DriversList market="FACTOR" symbol={target} limit={4} />
+        <DriversList market="FACTOR" symbol={target} />
       </View>
 
       {/* -------- correlations */}
@@ -632,4 +685,10 @@ const styles = StyleSheet.create({
   helpRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 16, alignSelf: 'flex-start' },
   helpLabel: { color: colors.muted, fontSize: 13, fontWeight: '600' },
   footnote: { color: colors.muted, fontSize: 12, lineHeight: 18, marginTop: 8 },
+  newsRow: { paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: colors.border },
+  newsMeta: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 4 },
+  newsDot: { width: 7, height: 7, borderRadius: 4 },
+  newsMetaText: { color: colors.muted, fontSize: 11.5, flex: 1 },
+  newsTitle: { color: colors.text, fontSize: 14, lineHeight: 19, fontWeight: '500' },
+  newsQuiet: { color: colors.muted, fontSize: 13, flex: 1 },
 });
